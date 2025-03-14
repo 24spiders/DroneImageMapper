@@ -4,17 +4,19 @@ Created on Thu Mar 13 14:18:00 2025
 
 @author: Labadmin
 """
-
 from PIL import Image
-from pyproj import Proj, Transformer
+from PIL.ExifTags import TAGS, GPSTAGS
+from pyproj import Transformer, CRS
 import os
 import geopandas as gpd
 from shapely.geometry import Point
+from tqdm import tqdm
 
 
-class XMPReader:
+class EXIFXMPReader:
     def __init__(self,
-                 image_path):
+                 image_path,
+                 out_epsg='EPSG:4326'):
         """
         XMPReader reads the XMP data of a single drone (DJI JPEG) image and parses some relevant metadata.
         Properties include coordinates and heights.
@@ -23,26 +25,51 @@ class XMPReader:
 
         Args:
             image_path (str): path to the DJI drone image
+            out_epsg (str): The EPSG that is desired. e.g., if EPSG:32611 is desired, out_epsg='EPSG:32611'. Default is EPSG:4326.
 
         """
+        # Set attributes
         self.image_path = image_path
-        self.xmp_string = self._read_xmp_data(image_path)
+        self.xmp_string = self._read_xmp_data()
+        print(self.xmp_string)
+        self.exif_dict = self._read_exif_data()
+        print(self.exif_dict)
+        raise ValueError
         self.lon_lat = self._get_lon_lat()
         self.flight_height = self._get_flight_height()
+        self.date_time = self._get_date_time()
+        self.altitude = self._get_altitude()
+        self.image_dims = self._get_image_dims()
+        self.camera_model = self._get_camera_model()
+        self.focal_length_35mm = self._get_35mm_focal_length()
 
-    def _read_xmp_data(self, image_path):
+        # Set transform
+        self.transformer = self._set_transform(out_epsg)
+
+    def _convert_to_degrees(self, value):
         """
-        Reads the XMP data from a JPEG image
+        Converts from DMS coordinates to degrees
 
         Args:
-            image_path (str): Path to the iamge.
+            value (tuple): DMS coordinate.
+
+        Returns:
+            float: degree coordinates of value.
+
+        """
+        d, m, s = value
+        return d + (m / 60.0) + (s / 3600.0)
+
+    def _read_xmp_data(self):
+        """
+        Reads the XMP data from a JPEG image
 
         Returns:
             xmp_string (str): The XMP data as a continuous string.
 
         """
         # Open the image
-        with open(image_path, "rb") as fin:
+        with open(self.image_path, "rb") as fin:
             # Read as a string
             img = fin.read()
             img_as_string = str(img)
@@ -53,18 +80,45 @@ class XMPReader:
                 xmp_string = img_as_string[xmp_start:xmp_end + 12]
         return xmp_string
 
+    def _read_exif_data(self):
+        """
+        Reads the EXIF data from a JPEG image
+
+        Returns:
+            exif_dict (str): A dict with EXIF tags as keys
+
+        """
+        with Image.open(self.image_path) as image:
+            exif_data = image._getexif()
+        if not exif_data:
+            raise Exception(f'Could not read EXIF data for {self.image_path}')
+        exif_dict = {TAGS.get(tag, tag): value for tag, value in exif_data.items()}
+        return exif_dict
+
     def _get_lon_lat(self):
         """
-        Parses the longitude and latitude from the XMP data. DJI stores this in EPSG:4326 by default.
+        Parses the longitude and latitude from the EXIF data. DJI stores this in Degrees/Minutes/Seconds by default, this converts to EPSG:4326.
 
         Returns:
             gps_longitude (float): Longitude of the drone at the time of image capture in EPSG:4326.
             gps_latitude (float): Latitude of the drone at the time of image capture in EPSG:4326.
 
         """
-        gps_longitude = float(self.xmp_string[self.xmp_string.find('drone-dji:GpsLongitude="') + len('drone-dji:GpsLongitude="'):self.xmp_string.find('drone-dji:AbsoluteAltitude=') - 7])
-        gps_latitude = float(self.xmp_string[self.xmp_string.find('drone-dji:GpsLatitude="') + len('drone-dji:GpsLatitude="'):self.xmp_string.find('drone-dji:GpsLongitude="') - 7])
-        return (gps_longitude, gps_latitude)
+        gps_info = self.exif_dict.get('GPSInfo')
+        gps_data = {GPSTAGS.get(tag, tag): value for tag, value in gps_info.items()}
+
+        # Extract latitude and longitude
+        if 'GPSLatitude' in gps_data and 'GPSLongitude' in gps_data:
+            lat = self._convert_to_degrees(gps_data['GPSLatitude'])
+            lon = self._convert_to_degrees(gps_data['GPSLongitude'])
+
+            # Adjust for hemisphere
+            if gps_data.get('GPSLatitudeRef') == 'S':
+                lat = -lat
+            if gps_data.get('GPSLongitudeRef') == 'W':
+                lon = -lon
+
+            return (lon, lat)
 
     def _get_flight_height(self):
         """
@@ -77,28 +131,45 @@ class XMPReader:
         flight_height = float(self.xmp_string[self.xmp_string.find('drone-dji:RelativeAltitude="') + len('drone-dji:RelativeAltitude="'):self.xmp_string.find('drone-dji:GimbalRollDegree=') - 7])
         return flight_height
 
-    def reproject_coords(self, out_epsg):
+    def _get_date_time(self):
+        return self.exif_dict.get('DateTimeOriginal')
+
+    def _get_altitude(self):
+        return self.exif_dict.get('GPSInfo')[6]
+
+    def _get_image_dims(self):
+        with Image.open(self.image_path) as image:
+            sz = image.size  # (width, height)
+        return sz
+
+    def _get_camera_model(self):
+        return self.exif_dict.get('Model')
+
+    def _get_35mm_focal_length(self):
+        return self.exif_dict.get('FocalLengthIn35mmFilm')
+
+    def _set_transform(self, out_epsg):
+        in_crs = CRS.from_epsg(4326)
+        out_crs = CRS.from_epsg(int(out_epsg.lower().replace('epsg:', '')))
+        transformer = Transformer.from_crs(in_crs, out_crs, always_xy=True)
+        return transformer
+
+    def reproject_coords(self):
         """
         Reprojects the coordinates from lat/lon (EPSG:4326) to the given EPSG
-
-        Args:
-            out_epsg (str): The EPSG that is desired. e.g., if EPSG:32611 is desired, out_epsg='EPSG:32611'
 
         Returns:
             x_t (float): Transformed x coordinate.
             y_t (float): Transformed y coordinate.
 
         """
-        inProj = Proj(init='epsg:4326')
-        outProj = Proj(init=out_epsg)
-        transproj = Transformer.from_proj(inProj, outProj)
-        x_t, y_t = transproj.transform(self.lon_lat[0], self.lon_lat[1])
+        x_t, y_t = self.transformer.transform(self.lon_lat[0], self.lon_lat[1])
         return (x_t, y_t)
 
 
 class SurveyToSpatial:
     def __init__(self,
-                 img_dir,
+                 survey_dir,
                  out_epsg):
         """
         Reads a directory of survey images, converts to geospatial format (a GeoJSON of points containing metadata attributes)
@@ -109,7 +180,7 @@ class SurveyToSpatial:
 
         """
         self.out_epsg = out_epsg
-        self.imgs = [os.path.join(img_dir, img) for img in os.listdir(img_dir) if img.lower().endswith('.JPG')]
+        self.imgs = [os.path.join(survey_dir, img) for img in os.listdir(survey_dir) if img.lower().endswith('.jpg')]
         self.img_metadata = self._get_image_metadata()
 
     def _get_image_metadata(self):
@@ -123,16 +194,35 @@ class SurveyToSpatial:
         img_coords = []
         img_names = []
         heights = []
+        datetimes = []
+        altitudes = []
+        image_dims = []
+        camera_models = []
+        focal_lengths = []
+        pbar = tqdm(total=len(self.imgs), desc='Reading image metadata')
         for img in self.imgs:
-            XMP = XMPReader(img)
-            x, y = XMP.reproject_coords(self.out_epsg)
+            Reader = EXIFXMPReader(img, self.out_epsg)
+            x, y = Reader.reproject_coords()
             img_coords.append((x, y))
             _, t = os.path.split(img)
             img_names.append(t)
-            heights.append(XMP.flight_height)
-        img_data = {'coords': img_coords,
-                    'filenames': img_names,
-                    'heights': heights}
+            heights.append(str(Reader.flight_height))  # Must be strings
+            datetimes.append(str(Reader.date_time))
+            altitudes.append(str(Reader.altitude))
+            image_dims.append(str(Reader.image_dims))
+            camera_models.append(str(Reader.camera_model))
+            focal_lengths.append(str(Reader.focal_length_35mm))
+            pbar.update(1)
+
+        pbar.close()
+        img_data = {'Coordinates': img_coords,
+                    'Filename': img_names,
+                    'Date Time': datetimes,
+                    'Altitude (m)': altitudes,
+                    'Flight Height (m)': heights,
+                    'Image Dimensions (w x h)': image_dims,
+                    'Camera Model': camera_models,
+                    '35mm Focal Length': focal_lengths}
         return img_data
 
     def img_to_geojson(self, geojson_path):
@@ -143,8 +233,8 @@ class SurveyToSpatial:
             geojson_path (str): Path to save the GeoJSON.
 
         """
-        geometry = [Point(x, y) for x, y in self.img_metadata['coords']]
-        gdf = gpd.GeoDataFrame(geometry=geometry, crs=f'EPSG:{self.out_epsg}')
+        geometry = [Point(x, y) for x, y in self.img_metadata['Coordinates']]
+        gdf = gpd.GeoDataFrame(geometry=geometry, crs=f'{self.out_epsg}')
         for key, values in self.img_metadata.items():
             gdf[key] = values
         gdf.to_file(geojson_path, driver='GeoJSON')
