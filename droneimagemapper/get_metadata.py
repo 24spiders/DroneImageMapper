@@ -31,10 +31,7 @@ class EXIFXMPReader:
         # Set attributes
         self.image_path = image_path
         self.xmp_string = self._read_xmp_data()
-        print(self.xmp_string)
         self.exif_dict = self._read_exif_data()
-        print(self.exif_dict)
-        raise ValueError
         self.lon_lat = self._get_lon_lat()
         self.flight_height = self._get_flight_height()
         self.date_time = self._get_date_time()
