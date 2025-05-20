@@ -1,4 +1,4 @@
-# DroneImageMapper
+# DroneSurveyMapper
 A tool for reading drone image metadata (Exif, XMP) and creating survey GeoJSONs for use in GIS. A convenient way to visualize surveys and keep track of flight parameters.
 
 
