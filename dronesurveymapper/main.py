@@ -6,7 +6,7 @@ Created on Thu Mar 13 14:26:10 2025
 """
 
 from dronesurveymapper.image.get_metadata import SurveyImagesToSpatial
-from drone_survey_mapper.video.video_exif_reader import DJIVideoExifReader
+from dronesurveymapper.video.video_exif_reader import DJIVideoExifReader
 
 if __name__ == '__main__':
     # Imagery
