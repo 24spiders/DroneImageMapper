@@ -164,7 +164,7 @@ class EXIFXMPReader:
         return (x_t, y_t)
 
 
-class SurveyToSpatial:
+class SurveyImagesToSpatial:
     def __init__(self,
                  survey_dir,
                  out_epsg):
